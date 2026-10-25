@@ -10,7 +10,25 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 def resolve_database_url(url: str) -> str:
-    """Anchor relative sqlite:/// URLs to backend/, leaving others untouched."""
+    """Normalize a DATABASE_URL for SQLAlchemy.
+
+    - Render/Heroku hand out ``postgres://`` URLs, which SQLAlchemy 2.x
+      rejects outright ("Can't load plugin: sqlalchemy.dialects:postgres").
+      They are rewritten to ``postgresql+psycopg2://`` so production starts
+      without config hacks. The explicit ``+psycopg2`` driver matters:
+      SQLAlchemy 2.1 resolves a bare ``postgresql://`` to the psycopg *v3*
+      dialect, while this project ships psycopg2-binary - a bare
+      ``postgresql://`` would crash with ``No module named 'psycopg'``.
+      Bare ``postgresql://`` URLs are pinned to psycopg2 for the same reason.
+    - Relative ``sqlite:///`` URLs are anchored to backend/ so local
+      development behaves the same no matter where the server was launched.
+
+    Every other URL passes through untouched.
+    """
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://"):]
     prefix = "sqlite:///"
     if not url.startswith(prefix):
         return url
@@ -61,13 +79,11 @@ class Settings(BaseSettings):
     # Set to false (e.g. in tests) to skip seeding the demo persona on startup.
     SEED_ON_STARTUP: bool = True
 
-    # CORS
-    BACKEND_CORS_ORIGINS: List[str] = [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000"
-    ]
+    # CORS: comma-separated allowed browser origins from the environment,
+    # e.g. CORS_ORIGINS=https://gayathrimarimuthu252008-star.github.io
+    # When unset/empty, parse_cors_origins() falls back to the localhost
+    # origins so local development is unchanged.
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 
     # Wearable config stubs
     FITBIT_CLIENT_ID: str = os.getenv("FITBIT_CLIENT_ID", "")
@@ -76,6 +92,33 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(BACKEND_DIR / ".env")
         extra = "ignore"
+
+
+# Origins allowed when CORS_ORIGINS is not set (local development only).
+DEFAULT_LOCAL_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+
+def parse_cors_origins(raw: str) -> List[str]:
+    """Parse the comma-separated CORS_ORIGINS value into exact origins.
+
+    Entries are trimmed and trailing slashes dropped so
+    ``https://user.github.io/`` matches the browser's Origin header
+    ``https://user.github.io`` (origins never carry a path). An empty value
+    returns the localhost origins, keeping local development unchanged.
+    """
+    if not raw or not raw.strip():
+        return list(DEFAULT_LOCAL_ORIGINS)
+    origins = []
+    for entry in raw.split(","):
+        origin = entry.strip().rstrip("/")
+        if origin:
+            origins.append(origin)
+    return origins
 
 
 def validate_secret_key(cfg: "Settings") -> None:

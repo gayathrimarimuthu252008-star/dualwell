@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta
 from app.seed import DEMO_EMAIL, seed_database
 from app.models.user import User
 from app.models.academic import AcademicEvent
+from app.models.lifestyle import MealLog
 from app.models.load_risk import DailyLoadSnapshot, RiskAssessment
 from app.services.insights_engine import WeeklyInsightsEngine
 from app.services.risk_prediction import risk_predictor
@@ -52,6 +53,38 @@ def test_reseed_regenerates_demo_data_relative_to_today(db):
     ).first()
     assert exam is not None
     assert exam.start_time.date() == date.today() + timedelta(days=2)
+
+
+def test_seed_is_idempotent_across_repeated_startups(db):
+    """create_all + seed_database run on every boot; they must not duplicate.
+
+    The lifespan calls them on each startup (and gunicorn may boot several
+    workers), so a second run has to be a no-op: the demo user already
+    exists -> skip, and every seeded table keeps its exact row count. The
+    unique email constraint is the backstop for the concurrent-worker race.
+    """
+    seed_database(db=db)
+
+    demo_id = db.query(User).filter_by(email=DEMO_EMAIL).one().id
+
+    def counts():
+        db.expire_all()
+        return {
+            "users": db.query(User).filter_by(email=DEMO_EMAIL).count(),
+            "events": db.query(AcademicEvent).filter_by(user_id=demo_id).count(),
+            "meals": db.query(MealLog).filter_by(user_id=demo_id).count(),
+        }
+
+    before = counts()
+    assert before["users"] == 1
+
+    # Second and third "startup" against the same database.
+    seed_database(db=db)
+    seed_database(db=db)
+    after = counts()
+
+    assert after == before
+    assert db.query(User).filter_by(email=DEMO_EMAIL).count() == 1
 
 
 def test_seeded_todays_snapshot_matches_live_engine(db):

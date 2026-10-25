@@ -1,11 +1,13 @@
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 import logging
 
-from app.config import settings
-from app.database import engine, Base
+from app.config import settings, parse_cors_origins
+from app.database import engine, Base, get_db
 from app.seed import seed_database
 from app.routers import (
     auth, wearable, academic, training, load_risk,
@@ -44,10 +46,11 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-# CORS Middleware
+# CORS Middleware - exact origins from CORS_ORIGINS (comma-separated env
+# var); falls back to localhost origins when unset, so local dev is unchanged.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_origins=parse_cors_origins(settings.CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,13 +80,32 @@ app.include_router(privacy.router, prefix=settings.API_V1_STR)
 app.include_router(recovery_guide.router, prefix=settings.API_V1_STR)
 
 @app.get("/api/health", tags=["Health"])
-def health_check():
-    return {
-        "status": "healthy",
-        "service": "DualWell API",
-        "version": settings.VERSION,
-        "database": "connected"
-    }
+def health_check(db: Session = Depends(get_db)):
+    """Readiness probe: runs a real SELECT 1 against the database.
+
+    Returns 200/{"database": "connected"} on success and 503 with
+    {"database": "unavailable"} when the database cannot be reached, so
+    Render's health checks gate traffic on actual database state.
+    """
+    try:
+        db.execute(text("SELECT 1"))
+        database_status = "connected"
+        overall = "healthy"
+        code = status.HTTP_200_OK
+    except Exception as exc:
+        logger.error(f"Health check failed - database unreachable: {exc}")
+        database_status = "unavailable"
+        overall = "degraded"
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(
+        status_code=code,
+        content={
+            "status": overall,
+            "service": "DualWell API",
+            "version": settings.VERSION,
+            "database": database_status,
+        },
+    )
 
 @app.get("/", tags=["Root"])
 def root():
